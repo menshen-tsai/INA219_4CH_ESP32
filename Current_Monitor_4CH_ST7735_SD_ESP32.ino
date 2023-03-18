@@ -18,13 +18,14 @@
  */
 #define DEBUG_NTPClient
 
-#include <TFT_eSPI.h> // Graphics and font library for ILI9341 driver chip
+#include <TFT_eSPI.h> // Graphics and font library for ST7735 driver chip
 #include <SPI.h>
 #include <SD.h>
 #include <Wire.h>
 #include <Adafruit_INA219.h>
 
 #include <WiFi.h>
+#include <WiFiClient.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <WiFiMulti.h>
@@ -32,10 +33,10 @@
 #include "SD.h"
 
 
-#include <WiFiClient.h>
-#include <NTPClient.h>
-#include <WiFiUdp.h>
-#include "RTClib.h"
+//#include <WiFiClient.h>
+//#include <NTPClient.h>
+//#include <WiFiUdp.h>
+//#include "RTClib.h"
 ////#include "SdFat.h"
 #include "Ticker.h"
 #include <time.h>
@@ -78,44 +79,22 @@ const char* host = "fsbrowser";
 
 const int chipSelect = 16; 
 File file;
+Ticker periodicI2C;
 
-WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "pool.ntp.org");
 long timezone = 8; 
 byte daysavetime = 0;
 
 
 // WiFi connect timeout per AP. Increase when connecting takes longer.
 const uint32_t connectTimeoutMs = 5000;
-
 unsigned long drawTime = 0;
 
 boolean ina219Status[4];
 boolean sdStatus=false;
 char logFilename[30];
 
-// Set RTC_TYPE for file timestamps.
-// 0 - millis()
-// 1 - DS1307
-// 2 - DS3231
-// 3 - PCF8523
-#define RTC_TYPE 0
-
-
-
-#if RTC_TYPE == 0
-RTC_Millis rtc;
-#elif RTC_TYPE == 1
-RTC_DS1307 rtc;
-#elif RTC_TYPE == 2
-RTC_DS3231 rtc;
-#elif RTC_TYPE == 3
-RTC_PCF8523 rtc;
-#else  // RTC_TYPE == type
-#error RTC_TYPE type not implemented.
-#endif  // RTC_TYPE == type
-
-
+boolean _i2cRead = false;
+static uint32_t count = 0;
 
 
 typedef struct 
@@ -138,33 +117,134 @@ INA219Measurement ina219Measurement;
 
 
 
-Ticker periodicI2C;
-boolean _i2cRead = false;
-
-
 void periodicI2C_Read();
 
 
-//------------------------------------------------------------------------------
-void printField(Print* pr, char sep, uint8_t v) {
-  if (sep) {
-    pr->write(sep);
-  }
-  if (v < 10) {
-    pr->write('0');
-  }
-  pr->print(v);
+void returnOK() {
+  server.send(200, "text/plain", "");
 }
 
-//------------------------------------------------------------------------------
-void printNow(Print* pr) {
-  DateTime now = rtc.now();
-  pr->print(now.year());
-  printField(pr, '-',now.month());
-  printField(pr, '-',now.day());
-  printField(pr, ' ',now.hour());
-  printField(pr, ':',now.minute());
-  printField(pr, ':',now.second());
+void returnFail(String msg) {
+  server.send(500, "text/plain", msg + "\r\n");
+}
+
+bool loadFromSdCard(String path) {
+  String dataType = "text/plain";
+  if (path.endsWith("/")) {
+    path += "index.htm";
+  }
+
+  if (path.endsWith(".src")) {
+    path = path.substring(0, path.lastIndexOf("."));
+  } else if (path.endsWith(".htm")) {
+    dataType = "text/html";
+  } else if (path.endsWith(".css")) {
+    dataType = "text/css";
+  } else if (path.endsWith(".js")) {
+    dataType = "application/javascript";
+  } else if (path.endsWith(".png")) {
+    dataType = "image/png";
+  } else if (path.endsWith(".gif")) {
+    dataType = "image/gif";
+  } else if (path.endsWith(".jpg")) {
+    dataType = "image/jpeg";
+  } else if (path.endsWith(".ico")) {
+    dataType = "image/x-icon";
+  } else if (path.endsWith(".xml")) {
+    dataType = "text/xml";
+  } else if (path.endsWith(".pdf")) {
+    dataType = "application/pdf";
+  } else if (path.endsWith(".zip")) {
+    dataType = "application/zip";
+  }
+
+  File dataFile = SD.open(path.c_str());
+  if (dataFile.isDirectory()) {
+    path += "/index.htm";
+    dataType = "text/html";
+    dataFile = SD.open(path.c_str());
+  }
+
+  if (!dataFile) {
+    return false;
+  }
+
+  if (server.hasArg("download")) {
+    dataType = "application/octet-stream";
+  }
+
+  if (server.streamFile(dataFile, dataType) != dataFile.size()) {
+    DBG_OUTPUT_PORT.println("Sent less data than expected!");
+  }
+
+  dataFile.close();
+  return true;
+}
+
+void printDirectory() {
+  if (!server.hasArg("dir")) {
+    return returnFail("BAD ARGS");
+  }
+  String path = server.arg("dir");
+  if (path != "/" && !SD.exists((char *)path.c_str())) {
+    return returnFail("BAD PATH");
+  }
+  File dir = SD.open((char *)path.c_str());
+  path = String();
+  if (!dir.isDirectory()) {
+    dir.close();
+    return returnFail("NOT DIR");
+  }
+  dir.rewindDirectory();
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "text/json", "");
+  WiFiClient client = server.client();
+
+  server.sendContent("[");
+  for (int cnt = 0; true; ++cnt) {
+    File entry = dir.openNextFile();
+    if (!entry) {
+      break;
+    }
+
+    String output;
+    if (cnt > 0) {
+      output = ',';
+    }
+
+    output += "{\"type\":\"";
+    output += (entry.isDirectory()) ? "dir" : "file";
+    output += "\",\"name\":\"";
+    output += entry.path();
+    output += "\"";
+    output += "\",\"size\":\"";
+    output += entry.size();
+    output += "\"";
+    output += "}";
+    server.sendContent(output);
+    entry.close();
+  }
+  server.sendContent("]");
+  dir.close();
+}
+
+void handleNotFound() {
+  if (sdStatus && loadFromSdCard(server.uri())) {
+    return;
+  }
+  String message = "SDCARD Not Detected\n\n";
+  message += "URI: ";
+  message += server.uri();
+  message += "\nMethod: ";
+  message += (server.method() == HTTP_GET) ? "GET" : "POST";
+  message += "\nArguments: ";
+  message += server.args();
+  message += "\n";
+  for (uint8_t i = 0; i < server.args(); i++) {
+    message += " NAME:" + server.argName(i) + "\n VALUE:" + server.arg(i) + "\n";
+  }
+  server.send(404, "text/plain", message);
+  DBG_OUTPUT_PORT.print(message);
 }
  
 void setup(void) {
@@ -172,6 +252,8 @@ void setup(void) {
   File root;
   IPAddress ip;
   char bufIP[20];
+  struct tm tmstruct ;
+  
   Serial.begin(115200);
   while (!Serial) {
   }
@@ -182,14 +264,15 @@ void setup(void) {
   Serial.print(" ");
   Serial.println(__TIME__);
 
-
-  ////////////////////////////////
-  // FILESYSTEM INIT
-  
-  if(!SD.begin(SD_CS)){
-    Serial.println("Card Mount Failed");
-    return;
+  if (!SD.begin(SD_CS)) {
+    tft.drawString("SD Failed", 0,100, 1);
+    Serial.println("SD.begin failed");
+    sdStatus = false;
+  } else {
+    sdStatus = true;
+    Serial.println("SD Initialized!");
   }
+ 
   // Don't save WiFi configuration in flash - optional
   WiFi.persistent(false);
 
@@ -217,23 +300,24 @@ void setup(void) {
   // MDNS INIT
   if (MDNS.begin(host)) {
     MDNS.addService("http", "tcp", 80);
-//    Serial.print(F("Open http://"));
-//    Serial.print(host);
-//    Serial.println(F(".local/edit to open the FileSystem Browser"));
   }
+
+
+  server.on("/list", HTTP_GET, printDirectory);
+//  server.on("/edit", HTTP_DELETE, handleDelete);
+//  server.on("/edit", HTTP_PUT, handleCreate);
+//  server.on("/edit", HTTP_POST, []() {
+//    returnOK();
+//  }, handleFileUpload);
+  server.onNotFound(handleNotFound);
+
   // Start server
   server.begin();
   Serial.println("HTTP server started");
   
-//  timeClient.begin();
-//  timeClient.setTimeOffset(3600*8);
-//  timeClient.update();
-//  epochTime = timeClient.getEpochTime();
-//  rtc.begin(epochTime);
-
   Serial.println("Contacting Time Server");
   configTime(3600*timezone, daysavetime*3600, "time.nist.gov", "0.pool.ntp.org", "1.pool.ntp.org");
-  struct tm tmstruct ;
+
   delay(2000);
   tmstruct.tm_year = 0;
   getLocalTime(&tmstruct, 5000);
@@ -246,13 +330,9 @@ void setup(void) {
   Serial.println(now);
   struct tm timeInfo;
   getLocalTime(&timeInfo);
-//  Serial.println(rtc.now().unixtime());
-//  DateTime now = rtc.now();
-//  sprintf(logFilename, "/INA219-%04d%02d%02d%02d%02d%02d.log",
-//                now.year(), now.month(), now.day(), now.hour(), now.minute(), now.second());
 
   sprintf(logFilename, "/INA219-%04d%02d%02d%02d%02d%02d.log",
-                timeInfo.tm_year+1900, timeInfo.tm_mon,
+                timeInfo.tm_year+1900, timeInfo.tm_mon+1,
                 timeInfo.tm_mday, timeInfo.tm_hour, timeInfo.tm_min, timeInfo.tm_sec);
   printf("Filename: %s\n", logFilename);
   
@@ -312,46 +392,20 @@ void setup(void) {
 
   tft.drawString(bufIP, 0, 120, 1);
   
-  // Set callback
-//  SD.dateTimeCallback(dateTime);
-
- if (!SD.begin(SD_CS)) {
-   tft.drawString("SD Failed", 0,100, 1);
-   Serial.println("SD.begin failed");
-   sdStatus = false;
- } else {
-    sdStatus = true;
-    Serial.println("SD Initialized!");
- }
- 
-
   if (sdStatus == true) {
-    file = SD.open(logFilename, FILE_WRITE);
-    {
-      Serial.print(F("file.opened with filename: "));
-      Serial.println(logFilename);
-      Serial.println(file);
-    }
-    // Print current date time to file.
-    file.print(F("Test file at: "));
-    printNow(&file);
-    file.println();
-
-    file.close();
     // List files in SD root.
-//    sd.ls(LS_DATE | LS_SIZE);
     root = SD.open("/");
-    printDirectory(root, 0);
-
-    Serial.println(F("Done"));
+    listFiles(root, 0);
   }
 
-    periodicI2C.attach_ms(1000, periodicI2C_Read);
+  periodicI2C.attach_ms(1000, periodicI2C_Read);
 }
 
-static uint32_t count = 0;
+
 
 void loop() {
+  
+  String ina219_S[4];
   char buf[20];
   static uint32_t i;
   float shuntvoltage = 0;
@@ -362,134 +416,75 @@ void loop() {
   String ina219_0S, ina219_1S, ina219_2S, ina219_3S;
   File root;
 
+
   server.handleClient();
-  ////MDNS.update();
 
   struct tm timeInfo = ina219Measurement._timeInfo;
-  
-//  DateTime dt = ina219Measurement.dt;
 
-  String currentDate = String(timeInfo.tm_year+1900) + "," + String(timeInfo.tm_mon) + "," + String(timeInfo.tm_mday);
-  String fullstring = currentDate + "," +
+  String currentDate = String(timeInfo.tm_year+1900) + "," + String(timeInfo.tm_mon+1) + "," + String(timeInfo.tm_mday);
+  String timeString = currentDate + "," +
          String(timeInfo.tm_hour) + "," + String(timeInfo.tm_min) + "," + String(timeInfo.tm_sec) + "," ;  
 
   if (_i2cRead == false) {
+    delay(100);
     return;
   }
-//  Serial.println("Data Ready");
   _i2cRead = false;
 
-  String ina219_S[4];
 
-  ina219_S[0] = String(ina219Measurement.measurement[0].busvoltage*1000) + "," +
-                    String(ina219Measurement.measurement[0].shuntvoltage,2) + "," +
-                    String(ina219Measurement.measurement[0].current_mA,3) + "," +
-                    String(ina219Measurement.measurement[0].power_mW);
-  
-
-//  ina219_0S = String(ina219Measurement.measurement[0].busvoltage*1000) + "," +
-//                    String(ina219Measurement.measurement[0].shuntvoltage,2) + "," +
-//                    String(ina219Measurement.measurement[0].current_mA,3) + "," +
-//                    String(ina219Measurement.measurement[0].power_mW);
-  sprintf(buf, "%4d ", int(ina219Measurement.measurement[0].busvoltage*1000));
-  tft.drawString(buf, 12, 18, 2);
-  sprintf(buf, "%4d ", int(ina219Measurement.measurement[0].current_mA));
-  tft.drawString(buf, 48, 18, 2);
-  
-  sprintf(buf, "%5d", int(ina219Measurement.measurement[0].power_mW));
-  tft.drawString(buf, 84, 18, 2);
-
-  ina219_S[1] = String(ina219Measurement.measurement[1].busvoltage*1000) + "," +
-                      String(ina219Measurement.measurement[1].shuntvoltage,2) + "," +
-                      String(ina219Measurement.measurement[1].current_mA,3) + "," +
-                      String(ina219Measurement.measurement[1].power_mW);
-
-//    ina219_1S = String(ina219Measurement.measurement[1].busvoltage*1000) + "," +
-//                      String(ina219Measurement.measurement[1].shuntvoltage,2) + "," +
-//                      String(ina219Measurement.measurement[1].current_mA,3) + "," +
-//                      String(ina219Measurement.measurement[1].power_mW);
-  
-  sprintf(buf, "%4d ", int(ina219Measurement.measurement[1].busvoltage*1000));
-  tft.drawString(buf, 12, 36, 2);
-  sprintf(buf, "%4d ", int(ina219Measurement.measurement[1].current_mA));
-  tft.drawString(buf, 48, 36, 2);
-  
-  sprintf(buf, "%5d", int(ina219Measurement.measurement[1].power_mW));
-  tft.drawString(buf, 84, 36, 2);
-
-  ina219_S[2] = String(ina219Measurement.measurement[2].busvoltage*1000) + "," +
-                      String(ina219Measurement.measurement[2].shuntvoltage,2) + "," +
-                      String(ina219Measurement.measurement[2].current_mA,3) + "," +
-                      String(ina219Measurement.measurement[2].power_mW);
-
-//    ina219_2S = String(ina219Measurement.measurement[2].busvoltage*1000) + "," +
-//                      String(ina219Measurement.measurement[2].shuntvoltage,2) + "," +
-//                      String(ina219Measurement.measurement[2].current_mA,3) + "," +
-//                      String(ina219Measurement.measurement[2].power_mW);
-
-    sprintf(buf, "%4d ", int(ina219Measurement.measurement[2].busvoltage*1000));
-    tft.drawString(buf, 12, 54, 2);
-    sprintf(buf, "%4d ", int(ina219Measurement.measurement[2].current_mA));
-    tft.drawString(buf, 48, 54, 2);
-  
-    sprintf(buf, "%5d", int(ina219Measurement.measurement[2].power_mW));
-    tft.drawString(buf, 84, 54, 2);
-
-    ina219_S[3] = String(ina219Measurement.measurement[3].busvoltage*1000,2) + "," +
-                      String(ina219Measurement.measurement[3].shuntvoltage*1000,2) + "," +
-                      String(ina219Measurement.measurement[3].current_mA,3) + "," +
-                      String(ina219Measurement.measurement[3].power_mW,3);
-
-//    ina219_3S = String(ina219Measurement.measurement[3].busvoltage*1000,2) + "," +
-//                      String(ina219Measurement.measurement[3].shuntvoltage*1000,2) + "," +
-//                      String(ina219Measurement.measurement[3].current_mA,3) + "," +
-//                      String(ina219Measurement.measurement[3].power_mW,3);
-
-    sprintf(buf, "%4d ", int(ina219Measurement.measurement[3].busvoltage*1000));
-    tft.drawString(buf, 12, 72, 2);
-    sprintf(buf, "%4d ", int(ina219Measurement.measurement[3].current_mA));
-    tft.drawString(buf, 48, 72, 2);
-  
-    sprintf(buf, "%5d", int(ina219Measurement.measurement[3].power_mW));
-    tft.drawString(buf, 84, 72, 2);
-
-  sprintf(buf, "%4d/%2d/%2d %2d:%02d:%02d", timeInfo.tm_year, timeInfo.tm_mon, timeInfo.tm_mday, timeInfo.tm_hour, timeInfo.tm_min, timeInfo.tm_sec);
-  tft.drawString(buf, 0, 110, 1);
-  timeClient.update();
-
-  String dataString = fullstring+ina219_S[0]+","+
-                                ina219_S[1]+","+
-                                ina219_S[2]+","+
-                                ina219_S[3]      ;
-
-
+  for(int i=0; i<4; i++) {
+    ina219_S[i] = String(ina219Measurement.measurement[i].busvoltage*1000) + "," +
+                  String(ina219Measurement.measurement[i].shuntvoltage,2) + "," +
+                  String(ina219Measurement.measurement[i].current_mA,3) + "," +
+                  String(ina219Measurement.measurement[i].power_mW);
+  }
+  String dataString = timeString+ina219_S[0]+"," + ina219_S[1]+","+
+                                 ina219_S[2]+"," + ina219_S[3]      ;
 
   if (sdStatus == true) {
     count ++;
     if (count > 9) {
       count = 0;
       Serial.println("File lists");
-//      sd.ls(LS_DATE|LS_SIZE);
       root = SD.open("/");
-      printDirectory(root, 0);
+      listFiles(root, 0);
     }
     // print to the serial port too:
     Serial.println(dataString);
 
     printf("Open %s for writting\n", logFilename);
-    file = SD.open(logFilename, FILE_WRITE) ;
+    file = SD.open(logFilename, FILE_APPEND) ;
     file.print(dataString);
     file.println();
     file.close();
-
   }
-  delay(1000);
+
+  for(int i=0; i<4; i++) {
+    if (ina219Measurement.measurement[i].busvoltage > -9.9) {
+      sprintf(buf, "%4d ", int(ina219Measurement.measurement[i].busvoltage*1000));
+      tft.drawString(buf, 12, 18+i*18, 2);
+      sprintf(buf, "%4d ", int(ina219Measurement.measurement[i].current_mA));
+      tft.drawString(buf, 48, 18+i*18, 2);
+  
+      sprintf(buf, "%5d", int(ina219Measurement.measurement[i].power_mW));
+      tft.drawString(buf, 84, 18+i*18, 2);
+    } else {
+      tft.drawString("N/A", 16, 18+i*18, 2);
+      tft.drawString("N/A", 52, 18+i*18, 2);
+      tft.drawString("N/A", 88, 18+i*18, 2);
+    }
+  }
+
+  sprintf(buf, "%4d/%2d/%2d %2d:%02d:%02d", timeInfo.tm_year+1900, timeInfo.tm_mon+1, timeInfo.tm_mday, timeInfo.tm_hour, timeInfo.tm_min, timeInfo.tm_sec);
+  tft.drawString(buf, 0, 110, 1);
+
+
 }
 
 
 
 
-void printDirectory(File dir, int numTabs) {
+void listFiles(File dir, int numTabs) {
   while (true) {
 
     File entry =  dir.openNextFile();
@@ -503,7 +498,7 @@ void printDirectory(File dir, int numTabs) {
     Serial.print(entry.name());
     if (entry.isDirectory()) {
       Serial.println("/");
-      printDirectory(entry, numTabs + 1);
+      listFiles(entry, numTabs + 1);
     } else {
       // files have sizes, directories do not
       Serial.print("\t\t");
@@ -522,15 +517,8 @@ void printDirectory(File dir, int numTabs) {
 void periodicI2C_Read(){
 
   getLocalTime(&ina219Measurement._timeInfo);
-//  String currentDate = String(dt.year()) + "," + String(dt.month()) + "," + String(dt.day());
-//  String fullstring = currentDate + "," +
-//         String(dt.hour()) + "," + String(dt.minute()) + "," + String(dt.second()) + "," ;  
-
   
   if (_i2cRead == false) {
-//    Serial.println("Read I2C");
-
-
     if (ina219Status[0] == true) {
       ina219Measurement.measurement[0].shuntvoltage = ina219_0.getShuntVoltage_mV();
       ina219Measurement.measurement[0].busvoltage = ina219_0.getBusVoltage_V();
