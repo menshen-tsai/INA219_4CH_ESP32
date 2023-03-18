@@ -265,13 +265,38 @@ void setup(void) {
   Serial.println(__TIME__);
 
   if (!SD.begin(SD_CS)) {
-    tft.drawString("SD Failed", 0,100, 1);
     Serial.println("SD.begin failed");
     sdStatus = false;
   } else {
     sdStatus = true;
     Serial.println("SD Initialized!");
   }
+    
+  if (sdStatus == true) {
+    // List files in SD root.
+    root = SD.open("/");
+    listFiles(root, 0);
+  }
+  
+
+  tft.init();
+  tft.setRotation(2);
+  tft.fillScreen(TFT_BLUE);
+  tft.setTextColor(TFT_WHITE, TFT_BLUE);
+  //tft.drawString("1234567890123456", 0, 0, 2);
+  //tft.drawString("CH1 (0x40)", 0, 0, 1);
+  tft.drawString("mV", 28, 0, 1); 
+  tft.drawString("mA", 64, 0, 1); 
+  tft.drawString("mW", 108, 0, 1); 
+  
+  tft.drawString("1", 0, 18, 2);
+  tft.drawString("2", 0, 36, 2);
+  tft.drawString("3", 0, 54, 2);
+  tft.drawString("4", 0, 72, 2);
+
+  if (sdStatus == false)
+    tft.drawString("SD Failed", 0,100, 1);
+
  
   // Don't save WiFi configuration in flash - optional
   WiFi.persistent(false);
@@ -285,6 +310,8 @@ void setup(void) {
 
 
   // Maintain WiFi connection
+  tft.drawString("Connecting...", 0, 120, 1);
+
   while (wifiMulti.run(connectTimeoutMs) != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
@@ -295,6 +322,7 @@ void setup(void) {
   ip = WiFi.localIP();
   Serial.print("IP: "); Serial.println(ip);
   sprintf(bufIP, "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+  tft.drawString(bufIP, 0, 120, 1);
 
   ////////////////////////////////
   // MDNS INIT
@@ -374,29 +402,10 @@ void setup(void) {
   Serial.println("Measuring voltage and current with INA219 ...");
 
 
-  tft.init();
-  tft.setRotation(2);
-  tft.fillScreen(TFT_BLUE);
-  tft.setTextColor(TFT_WHITE, TFT_BLUE);
-  //tft.drawString("1234567890123456", 0, 0, 2);
-  //tft.drawString("CH1 (0x40)", 0, 0, 1);
-  tft.drawString("mV", 28, 0, 1); 
-  tft.drawString("mA", 64, 0, 1); 
-  tft.drawString("mW", 108, 0, 1); 
-  
-  tft.drawString("1", 0, 18, 2);
-  tft.drawString("2", 0, 36, 2);
-  tft.drawString("3", 0, 54, 2);
-  tft.drawString("4", 0, 72, 2);
 
 
-  tft.drawString(bufIP, 0, 120, 1);
-  
-  if (sdStatus == true) {
-    // List files in SD root.
-    root = SD.open("/");
-    listFiles(root, 0);
-  }
+
+
 
   periodicI2C.attach_ms(1000, periodicI2C_Read);
 }
